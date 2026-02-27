@@ -1,0 +1,23 @@
+{
+  "name": "@monocle/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "monocle": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts",
+    "dev": "tsx src/index.ts",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "commander": "^12.0.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "tsx": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
