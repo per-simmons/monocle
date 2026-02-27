@@ -1,7 +1,6 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { monocleTools } from '../../../lib/tool-definitions';
+import { query } from '@anthropic-ai/claude-agent-sdk';
 
-const MONOCLE_SERVER = process.env.MONOCLE_SERVER_URL || 'http://localhost:7200';
+const MONOCLE_ROOT = process.env.MONOCLE_ROOT || '/Users/patsimmons/client-coding/monocle';
 
 const SYSTEM_PROMPT = `You are Monocle, an autonomous QA agent for iOS apps. You explore apps thoroughly and report bugs, slow loads, broken UI, and unexpected behavior.
 
@@ -17,79 +16,14 @@ Your process:
 Use element refs (@e1, @e2) for precise interactions. Always screenshot to verify results.
 Always call listElements before trying to interact with specific elements.`;
 
-interface ToolContent {
-  type: string;
-  text?: string;
-  source?: { type: string; media_type: string; data: string };
-}
-
-/**
- * Execute a tool by calling the Monocle server's REST API.
- */
-async function executeTool(
-  name: string,
-  params: Record<string, unknown>
-): Promise<{ anthropic: ToolContent[]; client: Record<string, unknown>[] }> {
-  const res = await fetch(`${MONOCLE_SERVER}/api/tools/execute`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, params }),
-  });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: res.statusText }));
-    const text = `Tool error: ${err.error || res.statusText}`;
-    return {
-      anthropic: [{ type: 'text', text }],
-      client: [{ type: 'text', text }],
-    };
-  }
-
-  const result = await res.json();
-  const anthropic: ToolContent[] = [];
-  const client: Record<string, unknown>[] = [];
-
-  for (const block of result.content || []) {
-    if (block.type === 'text') {
-      anthropic.push({ type: 'text', text: block.text });
-      client.push({ type: 'text', text: block.text });
-    } else if (block.type === 'image') {
-      anthropic.push({
-        type: 'image',
-        source: {
-          type: 'base64',
-          media_type: block.mimeType || 'image/jpeg',
-          data: block.data,
-        },
-      });
-      client.push({ type: 'image', data: block.data, mimeType: block.mimeType || 'image/jpeg' });
-    }
-  }
-
-  if (anthropic.length === 0) {
-    anthropic.push({ type: 'text', text: 'Tool returned no content' });
-    client.push({ type: 'text', text: 'Tool returned no content' });
-  }
-
-  return { anthropic, client };
+/** Strip the MCP prefix from tool names for display */
+function displayName(mcpName: string): string {
+  return mcpName.replace(/^mcp__monocle__/, '');
 }
 
 export async function POST(req: Request) {
-  const { messages: clientMessages } = await req.json();
+  const { message, sessionId } = await req.json();
 
-  const anthropic = new Anthropic({
-    apiKey: process.env.ANTHROPIC_API_KEY,
-  });
-
-  // Build the Anthropic message history from client messages
-  const messages: Anthropic.Messages.MessageParam[] = clientMessages.map(
-    (m: { role: string; content: string }) => ({
-      role: m.role as 'user' | 'assistant',
-      content: m.content,
-    })
-  );
-
-  // SSE stream
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
@@ -97,68 +31,143 @@ export async function POST(req: Request) {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
       }
 
+      // Track tool_use_id → display name
+      const toolNames = new Map<string, string>();
+
       try {
-        let turnCount = 0;
-        const maxTurns = 50;
-
-        // Agentic loop: keep going until Claude stops calling tools
-        while (turnCount < maxTurns) {
-          turnCount++;
-
-          const response = await anthropic.messages.create({
+        const q = query({
+          prompt: message,
+          options: {
             model: 'claude-opus-4-6',
-            max_tokens: 16384,
-            system: SYSTEM_PROMPT,
-            tools: monocleTools,
-            messages,
-          });
+            systemPrompt: SYSTEM_PROMPT,
+            cwd: MONOCLE_ROOT,
+            mcpServers: {
+              monocle: {
+                command: `${MONOCLE_ROOT}/node_modules/.bin/tsx`,
+                args: [`${MONOCLE_ROOT}/packages/server/src/index.ts`, '--stdio'],
+              },
+            },
+            tools: [], // Disable built-in Claude Code tools
+            allowedTools: ['mcp__monocle__*'], // Auto-approve all Monocle MCP tools
+            permissionMode: 'bypassPermissions',
+            allowDangerouslySkipPermissions: true,
+            includePartialMessages: true,
+            maxTurns: 50,
+            ...(sessionId ? { resume: sessionId } : {}),
+          },
+        });
 
-          // Send text blocks to client
-          for (const block of response.content) {
-            if (block.type === 'text') {
-              send({ type: 'text', content: block.text });
+        for await (const msg of q) {
+          switch (msg.type) {
+            // ── System init → send session ID to client ──
+            case 'system': {
+              if ('subtype' in msg && msg.subtype === 'init') {
+                send({ type: 'session', sessionId: msg.session_id });
+              }
+              break;
+            }
+
+            // ── Streaming events → text deltas + tool_use starts ──
+            case 'stream_event': {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const ev = (msg as any).event;
+
+              // Tool call starts
+              if (ev?.type === 'content_block_start') {
+                const block = ev.content_block;
+                if (block?.type === 'tool_use') {
+                  const name = displayName(block.name);
+                  toolNames.set(block.id, name);
+                  send({
+                    type: 'tool_call',
+                    name,
+                    id: block.id,
+                    params: {},
+                  });
+                }
+              }
+
+              // Text streaming
+              if (ev?.type === 'content_block_delta') {
+                if (ev.delta?.type === 'text_delta') {
+                  send({ type: 'text', content: ev.delta.text });
+                }
+              }
+              break;
+            }
+
+            // ── User messages (tool results with images) ──
+            case 'user': {
+              // Skip replayed messages from session resume
+              if ('isReplay' in msg && (msg as Record<string, unknown>).isReplay) break;
+
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const content = (msg as any).message?.content;
+              if (!Array.isArray(content)) break;
+
+              for (const block of content) {
+                if (block.type !== 'tool_result') continue;
+
+                const toolUseId = block.tool_use_id as string;
+                const name = toolNames.get(toolUseId) || 'unknown';
+
+                // Normalize content to array
+                const resultContent = Array.isArray(block.content)
+                  ? block.content
+                  : typeof block.content === 'string'
+                    ? [{ type: 'text', text: block.content }]
+                    : [];
+
+                // Build client-friendly result array
+                const clientResult: Record<string, unknown>[] = [];
+                for (const item of resultContent) {
+                  if (item.type === 'text') {
+                    clientResult.push({ type: 'text', text: item.text });
+                  } else if (item.type === 'image') {
+                    const src = item.source;
+                    if (src?.type === 'base64') {
+                      clientResult.push({
+                        type: 'image',
+                        data: src.data,
+                        mimeType: src.media_type || 'image/jpeg',
+                      });
+                    }
+                  }
+                }
+
+                send({
+                  type: 'tool_result',
+                  name,
+                  id: toolUseId,
+                  result: clientResult,
+                });
+              }
+              break;
+            }
+
+            // ── Tool progress → status updates ──
+            case 'tool_progress': {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const progress = msg as any;
+              const name = displayName(progress.tool_name || '');
+              send({ type: 'status', name, content: `Running ${name}...` });
+              break;
+            }
+
+            // ── Result → done or error ──
+            case 'result': {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const result = msg as any;
+              if (result.subtype === 'success') {
+                send({ type: 'done' });
+              } else {
+                const errors = result.errors?.join(', ') || result.subtype;
+                send({ type: 'error', content: `Agent error: ${errors}` });
+              }
+              break;
             }
           }
-
-          // If no tool calls, we're done
-          const toolUseBlocks = response.content.filter(
-            (b): b is Anthropic.Messages.ToolUseBlock => b.type === 'tool_use'
-          );
-
-          if (toolUseBlocks.length === 0 || response.stop_reason === 'end_turn') {
-            break;
-          }
-
-          // Execute tools and build results for both client display and next API call
-          const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
-
-          for (const block of toolUseBlocks) {
-            send({ type: 'tool_call', name: block.name, params: block.input, id: block.id });
-
-            const { anthropic: anthropicContent, client: clientContent } = await executeTool(
-              block.name,
-              block.input as Record<string, unknown>
-            );
-
-            send({ type: 'tool_result', name: block.name, id: block.id, result: clientContent });
-
-            toolResults.push({
-              type: 'tool_result',
-              tool_use_id: block.id,
-              content: anthropicContent as Anthropic.Messages.ToolResultBlockParam['content'],
-            });
-          }
-
-          // Append to message history for next iteration
-          messages.push({ role: 'assistant', content: response.content });
-          messages.push({ role: 'user', content: toolResults });
         }
-
-        if (turnCount >= maxTurns) {
-          send({ type: 'text', content: '\n\n[Agent reached maximum turn limit]' });
-        }
-
-        send({ type: 'done' });
       } catch (err) {
         send({
           type: 'error',

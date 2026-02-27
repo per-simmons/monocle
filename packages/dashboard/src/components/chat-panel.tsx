@@ -33,8 +33,8 @@ export function ChatPanel({ onRefInsert }: ChatPanelProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  // Message history for the API (role + content only)
-  const historyRef = useRef<Array<{ role: string; content: string }>>([]);
+  // Session ID for multi-turn conversation (Agent SDK resume)
+  const sessionIdRef = useRef<string | null>(null);
 
   // Initialize welcome message on client only
   useEffect(() => {
@@ -78,9 +78,6 @@ export function ChatPanel({ onRefInsert }: ChatPanelProps) {
     setLoading(true);
     setStatus('Thinking...');
 
-    // Add to history
-    historyRef.current.push({ role: 'user', content: text });
-
     // Create agent message placeholder
     const agentId = (Date.now() + 1).toString();
 
@@ -100,7 +97,10 @@ export function ChatPanel({ onRefInsert }: ChatPanelProps) {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: historyRef.current }),
+        body: JSON.stringify({
+          message: text,
+          sessionId: sessionIdRef.current,
+        }),
         signal: abort.signal,
       });
 
@@ -138,6 +138,11 @@ export function ChatPanel({ onRefInsert }: ChatPanelProps) {
           }
 
           switch (event.type) {
+            // Agent SDK session ID
+            case 'session':
+              sessionIdRef.current = event.sessionId as string;
+              break;
+
             case 'text':
               fullText += event.content as string;
               setMessages((prev) => prev.map((m) =>
@@ -188,6 +193,11 @@ export function ChatPanel({ onRefInsert }: ChatPanelProps) {
               break;
             }
 
+            // Tool progress status updates from Agent SDK
+            case 'status':
+              setStatus(event.content as string);
+              break;
+
             case 'done':
               setStatus('');
               break;
@@ -201,11 +211,6 @@ export function ChatPanel({ onRefInsert }: ChatPanelProps) {
               break;
           }
         }
-      }
-
-      // Save agent response to history
-      if (fullText) {
-        historyRef.current.push({ role: 'assistant', content: fullText });
       }
     } catch (err) {
       if ((err as Error).name !== 'AbortError') {
