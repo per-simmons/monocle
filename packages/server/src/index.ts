@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { createApiRouter } from './api/router.js';
 import { WebSocketHub } from './stream/ws-hub.js';
 import { createMcpServer } from './mcp/server.js';
+import { buildRegistry } from './mcp/tools/registry.js';
 import { config } from './config.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import * as simctl from './bridges/simctl.js';
@@ -11,6 +12,9 @@ const isStdio = process.argv.includes('--stdio');
 async function main() {
   // Always create MCP server (registers tools, boots session)
   const { server: mcpServer, ctx } = await createMcpServer();
+
+  // Build callable registry from MCP-registered tools (for REST API)
+  buildRegistry(mcpServer);
 
   if (isStdio) {
     // Stdio-only mode (for Claude Code, Cursor, etc.)
