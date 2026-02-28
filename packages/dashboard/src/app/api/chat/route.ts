@@ -23,6 +23,12 @@ const SYSTEM_PROMPT = `You are Monocle, an autonomous agent for iOS apps. You ca
 - After every action (tap, swipe, type), call listElements again to verify state changed
 - Use element refs (@e1, @e2, etc.) from listElements for precise interactions
 
+## Speed Rules
+- Do NOT watch videos or wait for media to finish playing. Verify the player loaded, then move on.
+- Do NOT read full articles/posts. Verify the content screen loaded, then go back.
+- Do NOT scroll to the bottom of infinite feeds. Check a few items, then move on.
+- Spend no more than 2 actions per screen before moving to the next.
+
 ## QA Process
 1. **Map the app**: Screenshot + listElements on the initial screen. Identify all navigation paths.
 2. **Explore systematically**: Visit every screen. For each:
@@ -228,6 +234,7 @@ function buildToolDefinitionsPrompt(tools: McpTool[]): string {
 async function runClaudeOnMacMini(
   prompt: string,
   sessionId?: string,
+  signal?: AbortSignal,
 ): Promise<AsyncGenerator<ClaudeStreamMessage>> {
   // Strategy: pipe prompt through SSH stdin → cat > tmpfile on Mac Mini.
   // Then claude reads the file. This avoids ALL shell escaping issues.
@@ -239,7 +246,7 @@ async function runClaudeOnMacMini(
     'export PATH=/opt/homebrew/bin:$PATH',
     'security unlock-keychain -p jeternumber2 ~/Library/Keychains/login.keychain-db 2>/dev/null',
     `cat > ${tmpFile}`,
-    `${CLAUDE_BIN} -p "$(cat ${tmpFile})" --output-format stream-json --verbose --max-turns 1 --model claude-opus-4-6${resumeFlag}`,
+    `${CLAUDE_BIN} -p "$(cat ${tmpFile})" --output-format stream-json --verbose --max-turns 1 --model claude-opus-4-6 --tools ''${resumeFlag}`,
     `rm -f ${tmpFile}`,
   ].join('; ');
 
@@ -249,9 +256,25 @@ async function runClaudeOnMacMini(
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 
+  // Kill SSH process when abort signal fires
+  const killProc = () => {
+    if (!proc.killed) {
+      log('info', '🛑 Abort signal — killing SSH process');
+      proc.kill('SIGTERM');
+      // Also kill any claude processes on Mac Mini
+      spawn('ssh', [MAC_MINI_SSH, 'pkill -f "claude.*stream-json" 2>/dev/null'], {
+        stdio: 'ignore',
+      });
+    }
+  };
+  signal?.addEventListener('abort', killProc, { once: true });
+
   // Pipe the prompt through stdin — no shell escaping needed
   proc.stdin!.write(prompt);
   proc.stdin!.end();
+
+  // Safety: kill process if it hasn't produced output in 3 minutes
+  const TURN_TIMEOUT_MS = 180_000;
 
   // Return async generator that yields parsed JSON messages
   async function* generate(): AsyncGenerator<ClaudeStreamMessage> {
@@ -260,8 +283,18 @@ async function runClaudeOnMacMini(
     const messageQueue: ClaudeStreamMessage[] = [];
     let done = false;
     let resolveWait: (() => void) | null = null;
+    let lastActivity = Date.now();
+
+    // Timeout watchdog — kills process if no output for 3 min
+    const watchdog = setInterval(() => {
+      if (Date.now() - lastActivity > TURN_TIMEOUT_MS && !done) {
+        log('warn', `Turn timeout (${TURN_TIMEOUT_MS / 1000}s no output) — killing`);
+        killProc();
+      }
+    }, 10_000);
 
     proc.stdout!.on('data', (chunk: Buffer) => {
+      lastActivity = Date.now();
       buffer += chunk.toString();
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
@@ -280,16 +313,20 @@ async function runClaudeOnMacMini(
     });
 
     proc.stderr!.on('data', (chunk: Buffer) => {
+      lastActivity = Date.now();
       const msg = chunk.toString().trim();
       if (msg) log('debug', `Claude stderr: ${msg.slice(0, 200)}`);
     });
 
     proc.on('close', () => {
       done = true;
+      clearInterval(watchdog);
+      signal?.removeEventListener('abort', killProc);
       resolveWait?.();
     });
 
     while (true) {
+      if (signal?.aborted) { clearInterval(watchdog); break; }
       if (messageQueue.length > 0) {
         yield messageQueue.shift()!;
       } else if (done) {
@@ -322,6 +359,16 @@ export async function POST(req: Request) {
   const session = sessions.get(ourSessionId) || { macMiniSessionId: null, conversationHistory: [] };
   const isResume = !!clientSessionId && sessions.has(clientSessionId);
 
+  // Use the request's abort signal to detect client disconnect (Stop/Clear)
+  const abortController = new AbortController();
+  const signal = abortController.signal;
+
+  // When client disconnects, trigger abort
+  req.signal.addEventListener('abort', () => {
+    log('info', '🛑 Client disconnected — aborting agent loop');
+    abortController.abort();
+  }, { once: true });
+
   log('info', `══════════════════════════════════════`);
   log('info', `── NEW REQUEST ──`);
   log('info', `Prompt: "${message.slice(0, 120)}${message.length > 120 ? '...' : ''}"`);
@@ -332,7 +379,12 @@ export async function POST(req: Request) {
   const stream = new ReadableStream({
     async start(controller) {
       function send(event: Record<string, unknown>) {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        if (signal.aborted) return;
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        } catch {
+          // Controller may be closed if client disconnected
+        }
       }
 
       let mcp: McpClient | null = null;
@@ -380,7 +432,7 @@ IMPORTANT: Always use <tool_call> blocks for tool invocations. Do not describe w
         // ── 3. Agentic loop ──
         let currentPrompt = userMessage;
 
-        while (turnCount < MAX_TURNS) {
+        while (turnCount < MAX_TURNS && !signal.aborted) {
           turnCount++;
           const turnStart = Date.now();
           log('info', `── Turn ${turnCount}/${MAX_TURNS} ──`);
@@ -391,6 +443,7 @@ IMPORTANT: Always use <tool_call> blocks for tool invocations. Do not describe w
           const messages = await runClaudeOnMacMini(
             currentPrompt,
             session.macMiniSessionId || undefined,
+            signal,
           );
 
           let fullText = '';
@@ -464,6 +517,7 @@ IMPORTANT: Always use <tool_call> blocks for tool invocations. Do not describe w
           const toolResultParts: string[] = [];
 
           for (const tc of toolCalls) {
+            if (signal.aborted) break;
             toolCallCount++;
             const tcId = `tc-${toolCallCount}`;
 

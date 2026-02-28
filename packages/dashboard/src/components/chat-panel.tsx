@@ -305,14 +305,17 @@ export function ChatPanel({ onRefInsert }: ChatPanelProps) {
           Agent Chat
         </h2>
         <div className="flex items-center gap-2">
-          {loading && (
-            <button
-              onClick={stopAgent}
-              className="text-xs px-2 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
-            >
-              Stop
-            </button>
-          )}
+          <button
+            onClick={stopAgent}
+            disabled={!loading}
+            className={`text-xs px-2 py-1 rounded transition-colors ${
+              loading
+                ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30'
+                : 'text-[var(--text-secondary)] opacity-40 cursor-not-allowed'
+            }`}
+          >
+            Stop
+          </button>
           <button
             onClick={clearChat}
             className="text-xs px-2 py-1 rounded border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--text-secondary)] transition-colors"
