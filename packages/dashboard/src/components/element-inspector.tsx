@@ -9,7 +9,7 @@ interface ElementInspectorProps {
 }
 
 const TYPE_COLORS: Record<string, string> = {
-  Button: '#6366f1',
+  Button: '#ededed',
   StaticText: '#22c55e',
   TextField: '#f59e0b',
   SecureTextField: '#f59e0b',

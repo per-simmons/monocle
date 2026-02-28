@@ -6,6 +6,7 @@ import { buildRegistry } from './mcp/tools/registry.js';
 import { config } from './config.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import * as simctl from './bridges/simctl.js';
+import * as idb from './bridges/idb.js';
 
 const isStdio = process.argv.includes('--stdio');
 
@@ -24,8 +25,16 @@ async function main() {
     return;
   }
 
+  // wsHub reference — set after httpServer is created, called by tap/swipe
+  let wsHub: WebSocketHub | null = null;
+
   // Full server mode: REST API + WebSocket streaming + MCP over HTTP
-  const app = createApiRouter();
+  const app = createApiRouter({
+    getDeviceUdid: () => ctx.getDeviceUdid(),
+    tap: idb.tap,
+    swipe: idb.swipe,
+    onInteraction: () => wsHub?.notifyChange(),
+  });
 
   // Elements endpoint (needs access to tool context)
   app.get('/api/elements', async (_req, res) => {
@@ -52,7 +61,7 @@ async function main() {
   const httpServer = createServer(app);
 
   // WebSocket hub for live simulator streaming
-  const wsHub = new WebSocketHub(httpServer);
+  wsHub = new WebSocketHub(httpServer);
 
   // Auto-start streaming if a device is booted
   try {

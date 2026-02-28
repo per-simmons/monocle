@@ -33,6 +33,16 @@ export class FrameCapture extends EventEmitter {
     }
   }
 
+  /**
+   * Reset to active mode — called after a tap/swipe so the capture
+   * immediately picks up the screen change instead of staying idle.
+   */
+  resetToActive(): void {
+    this.lastHash = '';
+    this.unchangedCount = 0;
+    this.currentFps = config.streamActiveFps;
+  }
+
   private scheduleNext(): void {
     const interval = 1000 / this.currentFps;
     this.intervalId = setTimeout(async () => {
@@ -54,7 +64,11 @@ export class FrameCapture extends EventEmitter {
         if (this.unchangedCount > 10) {
           this.currentFps = config.streamIdleFps;
         }
-        return; // Skip identical frame
+        // Still emit at idle rate so clients see a live connection
+        if (this.unchangedCount % config.streamIdleFps === 0) {
+          this.emit('frame', buffer);
+        }
+        return;
       }
 
       // Screen changed — speed up

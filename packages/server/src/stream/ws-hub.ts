@@ -10,12 +10,24 @@ export class WebSocketHub {
   private wss: WebSocketServer;
   private capture: FrameCapture | null = null;
   private clients = new Set<WebSocket>();
+  private lastFrame: Buffer | null = null;
+  private lastUdid: string | null = null;
 
   constructor(httpServer: Server) {
     this.wss = new WebSocketServer({ server: httpServer, path: '/stream' });
 
     this.wss.on('connection', (ws) => {
       this.clients.add(ws);
+
+      // Auto-restart capture if it was stopped (all previous clients disconnected)
+      if (!this.capture && this.lastUdid) {
+        this.startStreaming(this.lastUdid);
+      }
+
+      // Send the latest frame immediately so new clients don't see a blank screen
+      if (this.lastFrame && ws.readyState === ws.OPEN) {
+        ws.send(this.lastFrame);
+      }
 
       ws.on('close', () => {
         this.clients.delete(ws);
@@ -49,9 +61,11 @@ export class WebSocketHub {
       this.capture.stop();
     }
 
+    this.lastUdid = udid;
     this.capture = new FrameCapture(udid);
 
     this.capture.on('frame', (buffer: Buffer) => {
+      this.lastFrame = buffer;
       for (const client of this.clients) {
         // Backpressure: skip frame if client buffer is too full
         if (client.readyState === client.OPEN && client.bufferedAmount < config.wsBackpressureLimit) {
@@ -65,6 +79,16 @@ export class WebSocketHub {
     });
 
     this.capture.start();
+  }
+
+  /**
+   * Notify that the screen likely changed (e.g. after a tap/swipe).
+   * Resets the frame capture to active mode so it immediately detects the change.
+   */
+  notifyChange(): void {
+    if (this.capture) {
+      this.capture.resetToActive();
+    }
   }
 
   /**

@@ -23,6 +23,52 @@ interface ChatPanelProps {
   onRefInsert?: string;
 }
 
+/* ── Tool color categories ── */
+const TOOL_COLORS: Record<string, string> = {
+  tap: 'text-amber-400', tapByText: 'text-amber-400', tapById: 'text-amber-400',
+  doubleTap: 'text-amber-400', longPress: 'text-amber-400', swipe: 'text-amber-400',
+  type: 'text-cyan-400', typeInto: 'text-cyan-400', pressKey: 'text-cyan-400',
+  screenshot: 'text-emerald-400', getScreenText: 'text-emerald-400',
+  listElements: 'text-teal-400', findElement: 'text-teal-400', getElementInfo: 'text-teal-400',
+  waitForElement: 'text-violet-400', waitForText: 'text-violet-400', assertVisible: 'text-violet-400',
+  launchApp: 'text-rose-400', terminateApp: 'text-rose-400', getDeviceInfo: 'text-rose-400',
+  openUrl: 'text-rose-400', startRecording: 'text-red-400', stopRecording: 'text-red-400',
+  listDevices: 'text-rose-400',
+};
+const DOT_COLORS: Record<string, string> = {
+  tap: 'bg-amber-400', tapByText: 'bg-amber-400', tapById: 'bg-amber-400',
+  doubleTap: 'bg-amber-400', longPress: 'bg-amber-400', swipe: 'bg-amber-400',
+  type: 'bg-cyan-400', typeInto: 'bg-cyan-400', pressKey: 'bg-cyan-400',
+  screenshot: 'bg-emerald-400', getScreenText: 'bg-emerald-400',
+  listElements: 'bg-teal-400', findElement: 'bg-teal-400', getElementInfo: 'bg-teal-400',
+  waitForElement: 'bg-violet-400', waitForText: 'bg-violet-400', assertVisible: 'bg-violet-400',
+  launchApp: 'bg-rose-400', terminateApp: 'bg-rose-400', getDeviceInfo: 'bg-rose-400',
+  openUrl: 'bg-rose-400', startRecording: 'bg-red-400', stopRecording: 'bg-red-400',
+  listDevices: 'bg-rose-400',
+};
+
+/* ── Wave animation CSS (injected once) ── */
+const waveCSS = `
+@keyframes monocle-wave {
+  0%, 60%, 100% { transform: translateY(0); }
+  30% { transform: translateY(-8px); }
+}
+@keyframes monocle-pulse-ring {
+  0% { transform: scale(0.8); opacity: 1; }
+  100% { transform: scale(2.2); opacity: 0; }
+}
+@keyframes monocle-tool-enter {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.monocle-wave-dot {
+  animation: monocle-wave 1.2s ease-in-out infinite;
+}
+.monocle-tool-enter {
+  animation: monocle-tool-enter 0.3s ease-out;
+}
+`;
+
 export function ChatPanel({ onRefInsert }: ChatPanelProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [mounted, setMounted] = useState(false);
@@ -33,8 +79,18 @@ export function ChatPanel({ onRefInsert }: ChatPanelProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  // Session ID for multi-turn conversation (Agent SDK resume)
+  // Session ID for multi-turn conversation
   const sessionIdRef = useRef<string | null>(null);
+
+  // Inject CSS once
+  useEffect(() => {
+    if (typeof document !== 'undefined' && !document.getElementById('monocle-wave-css')) {
+      const style = document.createElement('style');
+      style.id = 'monocle-wave-css';
+      style.textContent = waveCSS;
+      document.head.appendChild(style);
+    }
+  }, []);
 
   // Initialize welcome message on client only
   useEffect(() => {
@@ -76,7 +132,7 @@ export function ChatPanel({ onRefInsert }: ChatPanelProps) {
     setMessages((prev) => [...prev, userMsg]);
     setInput('');
     setLoading(true);
-    setStatus('Thinking...');
+    setStatus('Connecting to simulator...');
 
     // Create agent message placeholder
     const agentId = (Date.now() + 1).toString();
@@ -138,7 +194,6 @@ export function ChatPanel({ onRefInsert }: ChatPanelProps) {
           }
 
           switch (event.type) {
-            // Agent SDK session ID
             case 'session':
               sessionIdRef.current = event.sessionId as string;
               break;
@@ -170,7 +225,6 @@ export function ChatPanel({ onRefInsert }: ChatPanelProps) {
               const resultArr = event.result as Array<Record<string, unknown>>;
               const newImages: string[] = [];
 
-              // Extract any screenshots from tool results
               for (const r of resultArr || []) {
                 if (r.type === 'image' && r.data) {
                   newImages.push(`data:${r.mimeType || 'image/jpeg'};base64,${r.data}`);
@@ -189,11 +243,10 @@ export function ChatPanel({ onRefInsert }: ChatPanelProps) {
                   ),
                 };
               }));
-              setStatus('Thinking...');
+              setStatus('Analyzing results...');
               break;
             }
 
-            // Tool progress status updates from Agent SDK
             case 'status':
               setStatus(event.content as string);
               break;
@@ -233,6 +286,17 @@ export function ChatPanel({ onRefInsert }: ChatPanelProps) {
     setStatus('');
   };
 
+  const clearChat = () => {
+    stopAgent();
+    sessionIdRef.current = null;
+    setMessages([{
+      id: Date.now().toString(),
+      role: 'agent',
+      content: 'Monocle is ready. Type a command like "take a screenshot" or "QA this app" to start.',
+      timestamp: new Date(),
+    }]);
+  };
+
   return (
     <div className="flex flex-col h-full bg-[var(--bg-secondary)]">
       {/* Header */}
@@ -240,94 +304,130 @@ export function ChatPanel({ onRefInsert }: ChatPanelProps) {
         <h2 className="text-sm font-semibold tracking-wide uppercase text-[var(--text-secondary)]">
           Agent Chat
         </h2>
-        {loading && (
+        <div className="flex items-center gap-2">
+          {loading && (
+            <button
+              onClick={stopAgent}
+              className="text-xs px-2 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
+            >
+              Stop
+            </button>
+          )}
           <button
-            onClick={stopAgent}
-            className="text-xs px-2 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
+            onClick={clearChat}
+            className="text-xs px-2 py-1 rounded border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--text-secondary)] transition-colors"
           >
-            Stop
+            Clear
           </button>
-        )}
+        </div>
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div className="flex-1 overflow-y-auto p-4 space-y-3">
         {messages.map((msg) => (
-          <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div
-              className={`max-w-[85%] rounded-lg px-3 py-2 text-sm ${
-                msg.role === 'user'
-                  ? 'bg-[var(--accent)] text-white'
-                  : 'bg-[var(--bg-tertiary)] text-[var(--text-primary)]'
-              }`}
-            >
-              {msg.content && (
-                <p className="whitespace-pre-wrap">{msg.content}</p>
-              )}
+          <div key={msg.id}>
+            {/* Message bubble */}
+            <div className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+              <div
+                className={`max-w-[85%] rounded-lg px-3 py-2 text-sm ${
+                  msg.role === 'user'
+                    ? 'bg-[var(--accent)] text-black'
+                    : 'bg-[var(--bg-tertiary)] text-[var(--text-primary)]'
+                }`}
+              >
+                {msg.content && (
+                  <p className="whitespace-pre-wrap">{msg.content}</p>
+                )}
 
-              {/* Inline screenshots */}
-              {msg.images && msg.images.length > 0 && (
-                <div className="mt-2 space-y-2">
-                  {msg.images.map((src, i) => (
-                    <img
-                      key={i}
-                      src={src}
-                      alt={`Screenshot ${i + 1}`}
-                      className="rounded max-w-full border border-[var(--border)]"
-                    />
-                  ))}
+                {/* Inline screenshots */}
+                {msg.images && msg.images.length > 0 && (
+                  <div className="mt-2 space-y-2">
+                    {msg.images.map((src, i) => (
+                      <img
+                        key={i}
+                        src={src}
+                        alt={`Screenshot ${i + 1}`}
+                        className="rounded max-w-full border border-[var(--border)]"
+                      />
+                    ))}
+                  </div>
+                )}
+
+                {!msg.content && !msg.images?.length && !msg.toolCalls?.length && msg.role === 'agent' && (
+                  <span className="text-[var(--text-secondary)] text-xs italic">...</span>
+                )}
+
+                <div className="text-[10px] mt-1 opacity-50" suppressHydrationWarning>
+                  {msg.timestamp.toLocaleTimeString()}
                 </div>
-              )}
-
-              {/* Tool calls */}
-              {msg.toolCalls && msg.toolCalls.length > 0 && (
-                <div className="mt-2 space-y-1">
-                  {msg.toolCalls.map((tc) => (
-                    <details key={tc.id} className="text-xs">
-                      <summary className="cursor-pointer text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center gap-1">
-                        {tc.status === 'running' ? (
-                          <span className="inline-block w-2 h-2 rounded-full bg-yellow-400 animate-pulse" />
-                        ) : (
-                          <span className="inline-block w-2 h-2 rounded-full bg-green-400" />
-                        )}
-                        {tc.name}({Object.keys(tc.params).length > 0 ? Object.keys(tc.params).join(', ') : ''})
-                      </summary>
-                      <pre className="mt-1 p-2 rounded bg-[var(--bg-primary)] overflow-x-auto text-[10px] max-h-32 overflow-y-auto">
-                        {tc.result
-                          ? JSON.stringify(
-                              tc.result.filter((r) => r.type !== 'image'),
-                              null,
-                              2
-                            )
-                          : JSON.stringify(tc.params, null, 2)}
-                      </pre>
-                    </details>
-                  ))}
-                </div>
-              )}
-
-              <div className="text-[10px] mt-1 opacity-50" suppressHydrationWarning>
-                {msg.timestamp.toLocaleTimeString()}
               </div>
             </div>
+
+            {/* Tool call timeline — displayed OUTSIDE the bubble as a visible timeline */}
+            {msg.toolCalls && msg.toolCalls.length > 0 && (
+              <div className="ml-2 mt-1 mb-1 border-l-2 border-[var(--border)] pl-3 space-y-1">
+                {msg.toolCalls.map((tc) => {
+                  const color = TOOL_COLORS[tc.name] ?? 'text-zinc-400';
+                  const dot = DOT_COLORS[tc.name] ?? 'bg-zinc-400';
+                  return (
+                    <div
+                      key={tc.id}
+                      className="monocle-tool-enter flex items-center gap-2 py-1 text-xs font-mono"
+                    >
+                      {/* Status indicator */}
+                      {tc.status === 'running' ? (
+                        <span className="relative flex h-2.5 w-2.5 shrink-0">
+                          <span className={`absolute inline-flex h-full w-full rounded-full ${dot} opacity-75 animate-ping`} />
+                          <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${dot}`} />
+                        </span>
+                      ) : (
+                        <span className={`inline-flex rounded-full h-2.5 w-2.5 shrink-0 ${dot}`} />
+                      )}
+
+                      {/* Tool name */}
+                      <span className={`font-semibold ${color}`}>{tc.name}</span>
+
+                      {/* Params preview */}
+                      {Object.keys(tc.params).length > 0 && (
+                        <span className="text-[var(--text-secondary)] truncate max-w-[180px]">
+                          {Object.entries(tc.params).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(' ')}
+                        </span>
+                      )}
+
+                      {/* Result indicator */}
+                      {tc.status === 'done' && (
+                        <span className="text-green-400 ml-auto shrink-0 text-[10px]">OK</span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         ))}
 
-        {/* Status indicator */}
+        {/* Active thinking/status indicator */}
         {loading && (
           <div className="flex justify-start">
-            <div className="bg-[var(--bg-tertiary)] rounded-lg px-3 py-2 text-sm">
+            <div className="bg-[var(--bg-tertiary)] rounded-lg px-4 py-3 text-sm">
               {status ? (
                 <span className="text-[var(--text-secondary)] text-xs flex items-center gap-2">
-                  <span className="inline-block w-2 h-2 rounded-full bg-[var(--accent)] animate-pulse" />
+                  <span className="relative flex h-3 w-3 shrink-0">
+                    <span className="absolute inline-flex h-full w-full rounded-full bg-[var(--accent)] opacity-75 animate-ping" />
+                    <span className="relative inline-flex rounded-full h-3 w-3 bg-[var(--accent)]" />
+                  </span>
                   {status}
                 </span>
               ) : (
-                <span className="inline-flex gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-[var(--text-secondary)] animate-bounce" style={{ animationDelay: '0ms' }} />
-                  <span className="w-1.5 h-1.5 rounded-full bg-[var(--text-secondary)] animate-bounce" style={{ animationDelay: '150ms' }} />
-                  <span className="w-1.5 h-1.5 rounded-full bg-[var(--text-secondary)] animate-bounce" style={{ animationDelay: '300ms' }} />
-                </span>
+                <div className="flex items-center gap-1.5">
+                  {[0, 1, 2, 3, 4].map((i) => (
+                    <span
+                      key={i}
+                      className="monocle-wave-dot w-1.5 h-1.5 rounded-full bg-[var(--accent)]"
+                      style={{ animationDelay: `${i * 0.12}s` }}
+                    />
+                  ))}
+                </div>
               )}
             </div>
           </div>
@@ -335,6 +435,28 @@ export function ChatPanel({ onRefInsert }: ChatPanelProps) {
 
         <div ref={messagesEndRef} />
       </div>
+
+      {/* Quick-start prompts — shown when idle with no conversation */}
+      {!loading && messages.length <= 1 && (
+        <div className="px-4 pb-2 flex flex-wrap gap-2">
+          {[
+            { label: 'Full QA', prompt: 'Run a full QA pass on this app. Explore every screen, test every interaction, and report all bugs.' },
+            { label: 'Screenshot', prompt: 'Take a screenshot of the current screen and describe what you see.' },
+            { label: 'Map all screens', prompt: 'Map every screen in the app. Navigate through all tabs and menus, screenshot each one, and list the navigation paths.' },
+            { label: 'Test inputs', prompt: 'Find all text inputs in the app and test them with valid data, empty input, and edge cases. Report any issues.' },
+            { label: 'Check performance', prompt: 'Navigate through the app and measure how long each screen takes to load. Flag anything slower than 2 seconds.' },
+            { label: 'Record a walkthrough', prompt: 'Start a screen recording, do a complete walkthrough of the app, then stop recording.' },
+          ].map((tag) => (
+            <button
+              key={tag.label}
+              onClick={() => { setInput(tag.prompt); inputRef.current?.focus(); }}
+              className="px-3 py-1.5 text-xs rounded-full border border-[var(--border)] text-[var(--text-secondary)] hover:border-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+            >
+              {tag.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Input */}
       <div className="p-4 border-t border-[var(--border)]">
@@ -352,7 +474,7 @@ export function ChatPanel({ onRefInsert }: ChatPanelProps) {
           <button
             onClick={sendMessage}
             disabled={loading || !input.trim()}
-            className="px-4 py-2 bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-50 text-white text-sm rounded-lg transition-colors"
+            className="px-4 py-2 bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-50 text-black text-sm rounded-lg transition-colors"
           >
             Send
           </button>
