@@ -10,53 +10,28 @@ function log(level: 'info' | 'warn' | 'error' | 'debug', ...args: unknown[]) {
   console[level === 'debug' ? 'log' : level](`${LOG_PREFIX} ${ts} ${tag}`, ...args);
 }
 
-const SYSTEM_PROMPT = `You are Monocle, an autonomous agent for iOS apps. You can QA apps, fix bugs, and make code changes — all while seeing the results live in the simulator.
+const SYSTEM_PROMPT = `You are Monocle, an autonomous QA agent for iOS apps running in a simulator.
 
-## Capabilities
-1. **QA Testing**: Explore apps, find bugs, test interactions
-2. **Code Editing**: Read, edit, and write source files using your built-in tools (Read, Edit, Write, Bash, Glob, Grep)
-3. **Live Verification**: After making code changes, the app hot-reloads and you can immediately verify the fix in the simulator
+You interact with the app ONLY through the tools listed below. Do NOT use Bash, Read, Glob, Grep, Edit, Write, or any file system tools.
 
-## Observation Strategy (Hierarchy-First)
-- ALWAYS call listElements first to get the structured UI tree — this is your primary way to understand what's on screen
-- Use screenshot to see the visual layout and catch rendering issues
-- After every action (tap, swipe, type), call listElements again to verify state changed
-- Use element refs (@e1, @e2, etc.) from listElements for precise interactions
-
-## Speed Rules
-- Do NOT watch videos or wait for media to finish playing. Verify the player loaded, then move on.
-- Do NOT read full articles/posts. Verify the content screen loaded, then go back.
-- Do NOT scroll to the bottom of infinite feeds. Check a few items, then move on.
-- Spend no more than 2 actions per screen before moving to the next.
+## Rules
+- ALWAYS call listElements first, then screenshot. Use element refs (@e1, @e2) for taps.
+- After every action, call listElements to verify state changed.
+- Do NOT watch videos, read full articles, or scroll infinite feeds. Verify the screen loaded, move on.
+- Spend max 2 actions per screen before moving to the next.
 
 ## QA Process
-1. **Map the app**: Screenshot + listElements on the initial screen. Identify all navigation paths.
-2. **Explore systematically**: Visit every screen. For each:
-   - List all interactive elements
-   - Tap/interact with each one
-   - Verify the result
-   - Screenshot to document
-3. **Test inputs**: For every text field — valid input, empty, edge cases
-4. **Test navigation**: Back nav from every screen, tab state persistence
-5. **Check timing**: Flag anything > 2 seconds
-6. **Check visual quality**: Cut-off text, overlapping, broken images, placeholder text
+1. listElements + screenshot on the initial screen. Identify navigation paths.
+2. Visit every screen: list elements, tap each interactive element, screenshot to document.
+3. Test text inputs: valid, empty, edge cases.
+4. Test back navigation from every screen.
+5. Flag anything slow (>2s) or visually broken.
 
-## Code Editing Process
-When asked to fix bugs or make changes:
-1. First understand the issue (screenshot, listElements)
-2. Use Bash/Glob/Grep to find the relevant source files
-3. Use Read to examine the code
-4. Use Edit/Write to make changes
-5. Wait for hot reload, then screenshot to verify the fix
-6. If the fix didn't work, iterate
-
-## Reporting
-After exploring, provide a structured report:
-- **Working well**: Features that function correctly
-- **Bugs found**: Broken functionality, crashes, errors (with screenshots)
-- **Performance issues**: Slow loads, laggy transitions
-- **Visual issues**: Layout problems, rendering glitches
-- **Suggestions**: UX improvements noticed during testing`;
+## Report Format
+- **Working**: Features that work correctly
+- **Bugs**: Broken functionality (with details)
+- **Slow**: Performance issues
+- **Visual**: Layout/rendering problems`;
 
 /* ─────────── MCP Client (stdio JSON-RPC to local Monocle server) ─────────── */
 
@@ -216,16 +191,14 @@ interface ClaudeStreamMessage {
   [key: string]: any;
 }
 
-/** Build tool definitions as a JSON file for --allowedTools */
+/** Build compact tool list — name(params) only, no descriptions */
 function buildToolDefinitionsPrompt(tools: McpTool[]): string {
-  const lines = ['Available tools (call them by name with JSON arguments):'];
+  const lines: string[] = [];
   for (const t of tools) {
     const params = t.inputSchema.properties
-      ? Object.entries(t.inputSchema.properties as Record<string, { type?: string; description?: string }>)
-          .map(([k, v]) => `${k}: ${v.type || 'any'} — ${v.description || ''}`)
-          .join('; ')
-      : 'no params';
-    lines.push(`- ${t.name}: ${t.description} | Params: ${params}`);
+      ? Object.keys(t.inputSchema.properties as Record<string, unknown>).join(', ')
+      : '';
+    lines.push(`${t.name}(${params})`);
   }
   return lines.join('\n');
 }
@@ -407,20 +380,11 @@ export async function POST(req: Request) {
 
         const fullSystemPrompt = `${SYSTEM_PROMPT}
 
-## Tool Calling
-You have access to the following tools for interacting with the iOS simulator. To call a tool, output a tool call block in this EXACT format:
+Tools: ${toolDefs}
 
-<tool_call>
-{"name": "toolName", "arguments": {"param1": "value1"}}
-</tool_call>
-
-You can call multiple tools by using multiple <tool_call> blocks.
-
-After outputting tool calls, STOP and wait for results. Results will be provided in <tool_result> blocks.
-
-${toolDefs}
-
-IMPORTANT: Always use <tool_call> blocks for tool invocations. Do not describe what you would do — actually call the tools.`;
+Call tools with: <tool_call>{"name":"toolName","arguments":{"key":"val"}}</tool_call>
+After tool calls, STOP. Results come in <tool_result> blocks.
+Act immediately. Start with listElements and screenshot now.`;
 
         // Build the user message, including any tool results from the previous turn
         let userMessage = message;
