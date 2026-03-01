@@ -20,6 +20,7 @@ export function SimulatorView({ serverUrl, onInspectToggle, inspectActive }: Sim
   const prevUrlRef = useRef<string | null>(null);
   const frameSizeRef = useRef({ width: 0, height: 0 });
   const [tapFeedback, setTapFeedback] = useState<{ x: number; y: number } | null>(null);
+  const dragRef = useRef<{ startX: number; startY: number; clientX: number; clientY: number } | null>(null);
 
   const handleFrame = useCallback((blob: Blob) => {
     const img = imgRef.current;
@@ -36,28 +37,79 @@ export function SimulatorView({ serverUrl, onInspectToggle, inspectActive }: Sim
     if (img) frameSizeRef.current = { width: img.naturalWidth, height: img.naturalHeight };
   }, []);
 
-  const handleClick = useCallback(async (e: React.MouseEvent<HTMLImageElement>) => {
+  /** Convert screen pixel to iOS logical coordinate */
+  const toLogical = useCallback((clientX: number, clientY: number) => {
     const img = imgRef.current;
-    if (!img || frameSizeRef.current.width === 0) return;
+    if (!img || frameSizeRef.current.width === 0) return null;
     const rect = img.getBoundingClientRect();
-    const relX = (e.clientX - rect.left) / rect.width;
-    const relY = (e.clientY - rect.top) / rect.height;
-    const logicalX = (relX * frameSizeRef.current.width) / DEVICE_SCALE;
-    const logicalY = (relY * frameSizeRef.current.height) / DEVICE_SCALE;
+    const relX = (clientX - rect.left) / rect.width;
+    const relY = (clientY - rect.top) / rect.height;
+    return {
+      x: (relX * frameSizeRef.current.width) / DEVICE_SCALE,
+      y: (relY * frameSizeRef.current.height) / DEVICE_SCALE,
+    };
+  }, []);
 
-    setTapFeedback({ x: e.clientX - rect.left, y: e.clientY - rect.top });
-    setTimeout(() => setTapFeedback(null), 300);
+  const handleMouseDown = useCallback((e: React.MouseEvent<HTMLImageElement>) => {
+    e.preventDefault();
+    dragRef.current = { startX: e.clientX, startY: e.clientY, clientX: e.clientX, clientY: e.clientY };
+  }, []);
 
-    try {
-      await fetch(`${serverUrl}/api/tap`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ x: logicalX, y: logicalY }),
-      });
-    } catch (err) {
-      console.error('Tap failed:', err);
+  const handleMouseMove = useCallback((e: React.MouseEvent<HTMLImageElement>) => {
+    if (dragRef.current) {
+      dragRef.current.clientX = e.clientX;
+      dragRef.current.clientY = e.clientY;
     }
-  }, [serverUrl]);
+  }, []);
+
+  const handleMouseUp = useCallback(async (e: React.MouseEvent<HTMLImageElement>) => {
+    const drag = dragRef.current;
+    dragRef.current = null;
+    if (!drag) return;
+
+    const dx = e.clientX - drag.startX;
+    const dy = e.clientY - drag.startY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    const img = imgRef.current;
+    if (!img) return;
+    const rect = img.getBoundingClientRect();
+
+    if (dist < 8) {
+      // Short movement = tap
+      const pos = toLogical(e.clientX, e.clientY);
+      if (!pos) return;
+      setTapFeedback({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+      setTimeout(() => setTapFeedback(null), 300);
+      try {
+        await fetch(`${serverUrl}/api/tap`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ x: pos.x, y: pos.y }),
+        });
+      } catch (err) {
+        console.error('Tap failed:', err);
+      }
+    } else {
+      // Drag = swipe
+      const start = toLogical(drag.startX, drag.startY);
+      const end = toLogical(e.clientX, e.clientY);
+      if (!start || !end) return;
+      try {
+        await fetch(`${serverUrl}/api/swipe`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            startX: start.x, startY: start.y,
+            endX: end.x, endY: end.y,
+            duration: 0.3,
+          }),
+        });
+      } catch (err) {
+        console.error('Swipe failed:', err);
+      }
+    }
+  }, [serverUrl, toLogical]);
 
   useEffect(() => {
     const wsUrl = serverUrl.replace('http', 'ws') + '/stream';
@@ -126,8 +178,11 @@ export function SimulatorView({ serverUrl, onInspectToggle, inspectActive }: Sim
                   ref={imgRef}
                   alt="Simulator"
                   onLoad={handleImageLoad}
-                  onClick={handleClick}
-                  className="h-full w-full object-contain cursor-pointer"
+                  onMouseDown={handleMouseDown}
+                  onMouseMove={handleMouseMove}
+                  onMouseUp={handleMouseUp}
+                  draggable={false}
+                  className="h-full w-full object-contain cursor-pointer select-none"
                 />
               </div>
               {/* Side button (right) */}
